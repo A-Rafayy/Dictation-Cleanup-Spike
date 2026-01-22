@@ -1,0 +1,14 @@
+{
+    "manifest_version": 3,
+    "name": "Dictation CleanUp",
+    "version": "1.0.0",
+
+    "description": "Invisible text cleanup for dictation workflows",
+
+    "content_scripts": [
+        {
+            "matches": ["<all_urls>"],
+            "js": ["content.js"]
+        }
+    ]
+}
