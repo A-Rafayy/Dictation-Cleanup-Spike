@@ -1,4 +1,3 @@
-console.log("Detection Cleanup loaded");
 window.PICKLE_ENABLED = true;
 
 const COMMANDS = {
@@ -6,7 +5,6 @@ const COMMANDS = {
     "scratch that": "",
     "delete that": "",
     "new paragraph": "\n\n",
-    "new para": "\n\n",
     "new line": "\n"
 }
 
@@ -20,23 +18,34 @@ function startCleanupSpike() {
         return;
     }
 
-    console.log("Dictation Cleanup Active");
-
     const heartbeat = document.createElement('div');
     heartbeat.id = "spike-heartbeat";
-    heartbeat.style = "position: fixed; top: 20px; right: 20px; width: 20px; height: 20px; border-radius: 50%; background: gray; z-index: 999999; transition: background 0.2s; border: 2px solid green; pointer-events: none;";
+    heartbeat.style = "position: fixed; top: 20px; right: 20px; width: 12px; height: 12px; border-radius: 50%; z-index: 999999; transition: transform 0.2s background 0.3s; border: 2px solid white; pointer-events: none;";
+    heartbeat.style.display = window.PICKLE_ENABLED ? 'block' : 'none';
+    console.log('helloooo');
     document.body.appendChild(heartbeat);
 
-    window.setHeartbeat = (color) => {
-        heartbeat.style.background = color;
-        if (color === "blue") {
-            setTimeout(() =>
-                heartbeat.style.background = (window.PICKLE_ENABLED ? "gray" : "red"), 500);
-        }
+    window.setHeartbeatFlash = () => {
+        if (!window.PICKLE_ENABLED) return;
+        heartbeat.style.background = "blue";
+        setTimeout(() => {
+            if (window.PICKLE_ENABLED) heartbeat.style.background = "purple";
+        }, 500);
     }
+
+
 
     // The listeners
     let debounceTimer;
+
+    // Toggle Listener (Ctrl+Shift+P)
+    document.addEventListener('keydown', (e) => {
+        if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toUpperCase() === 'P') {
+            window.PICKLE_ENABLED = !window.PICKLE_ENABLED;
+            heartbeat.style.display = window.PICKLE_ENABLED ? 'block' : 'none';
+            console.log("Pickle mode: ", window.PICKLE_ENABLED ? "Enabled" : "Disabled");
+        }
+    })
 
     document.addEventListener('input', (e) => {
         const target = e.target;
@@ -53,7 +62,6 @@ function startCleanupSpike() {
 
     document.addEventListener('blur', (e) => {
         if (e.target.matches('textarea, input, [contenteditable="true"]')) {
-            console.log("Blur cleanup: Ready for pass 2 logic");
             runConservativeCleanup(e.target);
         }
     }, true);
@@ -63,13 +71,11 @@ function startCleanupSpike() {
 // The Moniter
 function processText(element) {
     if (!window.PICKLE_ENABLED) {
-        window.setHeartbeat("red");
+        window.setHeartbeatFlash();
         return;
     }
 
     const currentText = element.isContentEditable ? element.innerText : element.value
-    // const isEditable = element.isContentEditable;
-    // const val = isEditable ? element.innerText : element.value;
 
     for (const [cmd, replacement] of Object.entries(COMMANDS)) {
         if (currentText.toLowerCase().trim().endsWith(cmd)) {
@@ -137,7 +143,7 @@ function runConservativeCleanup(element) {
     text = text.replace(/  +/g, ' ');
 
     if (text !== originalText) {
-        window.setHeartbeat("blue");
+        window.setHeartbeatFlash();
         applyFix(element, null, text, true);
     }
 }
