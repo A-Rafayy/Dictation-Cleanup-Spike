@@ -10,9 +10,17 @@ const COMMANDS = {
 
 const ACRONYMS = ["mri", "ct", "iv", "pt", "xr"];
 
+const IS_DOCS = window.location.hostname.includes("docs.google.com");
+
 // Visual Heartbeat (for testing)
 
 function startCleanupSpike() {
+
+    if (IS_DOCS) {
+        console.log("Dictation Spike: Standing down on Google Docs for cursor safety.");
+        return;
+    }
+
     if (!document.body) {
         window.requestAnimationFrame(startCleanupSpike);
         return;
@@ -20,9 +28,8 @@ function startCleanupSpike() {
 
     const heartbeat = document.createElement('div');
     heartbeat.id = "spike-heartbeat";
-    heartbeat.style = "position: fixed; top: 20px; right: 20px; width: 12px; height: 12px; border-radius: 50%; z-index: 999999; transition: transform 0.2s background 0.3s; border: 2px solid white; pointer-events: none;";
+    heartbeat.style = "position: fixed; top: 20px; right: 20px; width: 12px; height: 12px; border-radius: 50%; z-index: 999999; transition: transform 0.2s, background 0.3s; border: 2px solid white; pointer-events: none; background: purple";
     heartbeat.style.display = window.PICKLE_ENABLED ? 'block' : 'none';
-    console.log('helloooo');
     document.body.appendChild(heartbeat);
 
     window.setHeartbeatFlash = () => {
@@ -78,61 +85,98 @@ function processText(element) {
     const currentText = element.isContentEditable ? element.innerText : element.value
 
     for (const [cmd, replacement] of Object.entries(COMMANDS)) {
-        if (currentText.toLowerCase().trim().endsWith(cmd)) {
+        const commandRegex = new RegExp(`\\b${cmd}\\s*$`, "i");
+        if (commandRegex.test(currentText)) {
             applyFix(element, cmd, replacement, false);
             break;
         }
+        // if (currentText.toLowerCase().trim().endsWith(cmd)) {
+        //     applyFix(element, cmd, replacement, false);
+        //     break;
+        // }
     }
 }
 // The Surgery (caret-safe)
 function applyFix(el, trigger, replacement, isFullField = false) {
 
+    if (document.activeElement !== el) {
+        return;
+    }
+
     const isEditable = el.isContentEditable;
 
-    if (!isEditable) {
-        const start = el.selectionStart;
-        const end = el.selectionEnd;
+    try {
 
-        let newVal;
+        if (!isEditable) {
+            const start = el.selectionStart;
 
-        if (isFullField) {
-            newVal = replacement;
-        } else {
-            newVal = el.value.slice(0, start - trigger.length) + replacement + el.value.slice(end);
+            if (isFullField) {
+                const oldLen = el.value.length;
+                el.value = replacement;
+                const offSet = replacement.length - oldLen;
+
+                el.setSelectionRange(start + offSet, start + offSet);
+            }
+            else {
+                const textBefore = el.value.slice(0, start);
+                const cmdRegex = new RegExp(`\\b${trigger}\\s*$`, "i");
+                const match = textBefore.match(cmdRegex);
+
+                if (match) {
+                    el.setRangeText(replacement, match.index, start, 'end');
+                }
+            }
+            // el.dispatchEvent(new Event('input', { bubbles: true }));
         }
-        el.value = newVal;
+        else {
+            const selection = window.getSelection();
 
-        const newPos = isFullField ? start : start - trigger.length + replacement.length;
-        el.setSelectionRange(newPos, newPos);
+            if (!selection.rangeCount) {
+                return;
+            }
+            const range = selection.getRangeAt(0);
+            const node = range.startContainer;
 
-        el.dispatchEvent(new Event('input', { bubbles: true }));
+            if (node.nodeType === Node.TEXT_NODE) {
+                const currentOffset = range.startOffset;
+                if (isFullField) {
+                    node.textContent = replacement;
+                    range.setStart(node, Math.min(currentOffset, replacement.length));
+                    range.collapse(true);
+                }
+                else {
+                    const text = node.textContent.slice(0, currentOffset);
+                    const cmdRegex = new RegExp(`${trigger}\\s*$`, "i");
+                    const match = text.match(cmdRegex);
+                    if (match) {
+                        const fixRange = document.createRange();
+                        fixRange.setStart(node, match.index);
+                        fixRange.setEnd(node, currentOffset);
+
+                        fixRange.deleteContents();
+                        const newTextNode = document.createTextNode(replacement);
+                        fixRange.insertNode(newTextNode);
+
+                        range.setStartAfter(newTextNode);
+                        range.collapse(true);
+                    }
+                }
+                selection.removeAllRanges();
+                selection.addRange(range);
+            }
+            el.dispatchEvent(new Event('input', { bubbles: true }));
+        }
     }
-    else {
-        const selection = window.getSelection();
-        if (!selection || !selection.rangeCount) return;
-
-        const range = selection.getRangeAt(0);
-        const node = range.endContainer;
-
-        if (isFullField) {
-            el.innerText = replacement;
-        } else if (node.nodeType === node.TEXT_NODE) {
-            const regex = new RegExp(trigger + "\\s*$", "i");
-            node.textContent = node.textContent.replace(regex, replacement);
-            range.setStart(node, node.textContent.length);
-            range.collapse(true);
-        }
-
-
+    catch (e) {
+        console.warn("Safe Edit Triggered: Protection check passed.")
     }
 }
 // Conservative Cleanup
 function runConservativeCleanup(element) {
 
-    if (!window.PICKLE_ENABLED) return;
+    if (!window.PICKLE_ENABLED || document.activeElement !== element) return;
 
-    const isEditable = element.isContentEditable;
-    let text = isEditable ? element.innerText : element.value;
+    let text = element.isContentEditable ? element.innerText : element.value;
     let originalText = text;
 
     ACRONYMS.forEach(acr => {
