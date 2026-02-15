@@ -13,5 +13,3 @@ A lightweight Chrome Extension designed to sanitize real-time dictation by inter
 4. Click Load Unpacked and select the cloned folder
 
 5. You should see the "Dictation Cleanup Spike" card appear in your extension list.
-
-6. Press Ctrl + Shift + P (Windows/Linux) or Cmd + Shift + P (Mac) to toggle the extension on and off.
