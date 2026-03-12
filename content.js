@@ -29,7 +29,7 @@ document.addEventListener('input', (e) => {
     clearTimeout(globalDebounceTimer);
     globalDebounceTimer = setTimeout(() => {
         applyGlobalAcronymFix(target);
-    }, 700); // Slightly faster for better responsiveness
+    }, 1000); // Increased debounce delay to wait for speech input to finish
 });
 
 function applyGlobalAcronymFix(el) {
@@ -93,7 +93,7 @@ function applyFix(el, trigger, replacement) {
     if (!sel || !sel.rangeCount) { isProcessing = false; return; }
 
     const range = sel.getRangeAt(0);
-    
+
     try {
         // 1. Highlight the trigger word ("new line", etc.)
         range.setStart(sel.anchorNode, Math.max(0, sel.anchorOffset - trigger.length));
@@ -117,6 +117,18 @@ function applyFix(el, trigger, replacement) {
     } catch (err) {
         console.error("Command Error:", err);
     }
-    
-    setTimeout(() => { isProcessing = false; }, 50);
+
+    // **Fix the caret position after insertion**
+    setTimeout(() => { 
+        const caretPosition = sel.focusOffset;
+        const newRange = document.createRange();
+        const currentNode = sel.focusNode;
+        newRange.setStart(currentNode, caretPosition);
+        newRange.collapse(true);
+        sel.removeAllRanges();
+        sel.addRange(newRange);
+        
+        // Reset the processing flag after fixing caret position
+        isProcessing = false;
+    }, 50);
 }
