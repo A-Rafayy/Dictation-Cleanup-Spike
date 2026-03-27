@@ -29,8 +29,7 @@ document.addEventListener('input', (e) => {
     clearTimeout(globalDebounceTimer);
     globalDebounceTimer = setTimeout(() => {
         applyGlobalAcronymFix(target);
-    }, 500); // Reduced debounce delay for faster dictation systems (Dragon)
-
+    }, 700); // Debounce to allow proper dictation pause handling
 });
 
 function applyGlobalAcronymFix(el) {
