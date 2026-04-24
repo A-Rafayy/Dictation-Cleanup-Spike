@@ -11,51 +11,20 @@ const COMMANDS = {
 
 const ACRONYMS = ["MRI", "CT", "IV", "PT", "XR"];
 
-const CARET_STABILIZE_MS = 250; // Time window to stabilize caret after click or selection change
-let lastMouseDownAt = 0;
-let lastSelectionChangeAt = 0;
-let lastKeyCommitAt = 0;
-
-document.addEventListener('mousedown', () => {
-    lastMouseDownAt = Date.now();
-});
-
-document.addEventListener('selectionchange', () => {
-    lastSelectionChangeAt = Date.now();
-});
-
-document.addEventListener('keydown', (e) => {
-    const commitKeys = [
-        "ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown",
-        "Backspace", "Delete", "Enter"
-    ];
-
-    if (
-        commitKeys.includes(e.key) ||
-        (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey)
-    ) {
-        lastKeyCommitAt = Date.now();
-    }
-});
-
-// This function checks if the caret has stabilized before allowing text insertion or command execution
-function isCaretStable() {
-    const now = Date.now();
-
-    const recentClick = now - lastMouseDownAt < CARET_STABILIZE_MS;
-    const recentSelectionChange = now - lastSelectionChangeAt < CARET_STABILIZE_MS;
-    const hasKeyboardCommit = lastKeyCommitAt > lastMouseDownAt;
-
-    if (hasKeyboardCommit) return true;
-    if (!recentClick && !recentSelectionChange) return true;
-
-    return false;
-}
+const NOISE_THRESHOLD_MS = 300;  // Time threshold to ignore short bursts of input (noise)
+let lastInputTime = 0;
 
 document.addEventListener('input', (e) => {
-    if (isProcessing || !isCaretStable()) return; // Don't process if the caret is unstable
+    if (isProcessing) return;
     const target = e.target;
     if (!target.matches('textarea, input, [contenteditable="true"]')) return;
+
+    // Ignore small bursts of input that might be noise
+    const now = Date.now();
+    if (now - lastInputTime < NOISE_THRESHOLD_MS) return;
+
+    // Update last input time
+    lastInputTime = now;
 
     // 1. COMMANDS (Instant)
     const fullText = target.isContentEditable ? target.innerText : target.value;
@@ -136,21 +105,23 @@ function applyFix(el, trigger, replacement) {
     const range = sel.getRangeAt(0);
 
     try {
-       
+        // 1. Highlight the trigger word ("new line", etc.)
         range.setStart(sel.anchorNode, Math.max(0, sel.anchorOffset - trigger.length));
         sel.removeAllRanges();
         sel.addRange(range);
 
-       
+        // 2. Delete the trigger word
         document.execCommand('delete', false);
         
+        // 3. Insert clean breaks based on the command
         if (replacement.includes("<br>")) {
-            
+            // "new line" = 1 break, "new paragraph" = 3 breaks
             const count = (replacement.match(/<br>/g) || []).length;
             for (let i = 0; i < count; i++) {
                 document.execCommand('insertLineBreak', false);
             }
         } else {
+            // For "scratch that", just leave it deleted
             document.execCommand('insertText', false, replacement);
         }
     } catch (err) {
