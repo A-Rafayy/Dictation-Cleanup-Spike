@@ -1,4 +1,5 @@
 window.PICKLE_ENABLED = true;
+
 let isProcessing = false;
 let globalDebounceTimer = null;
 
@@ -11,134 +12,313 @@ const COMMANDS = {
 
 const ACRONYMS = ["MRI", "CT", "IV", "PT", "XR"];
 
-const NOISE_THRESHOLD_MS = 300;  // Time threshold to ignore short bursts of input (noise)
-let lastInputTime = 0;
+const CARET_STABILIZE_MS = 300;
+let lastMouseDownAt = 0;
+let lastSelectionChangeAt = 0;
+let lastKeyCommitAt = 0;
 
-document.addEventListener('input', (e) => {
-    if (isProcessing) return;
-    const target = e.target;
-    if (!target.matches('textarea, input, [contenteditable="true"]')) return;
+document.addEventListener("mousedown", () => {
+    lastMouseDownAt = Date.now();
+}, true);
 
-    // Ignore small bursts of input that might be noise
-    const now = Date.now();
-    if (now - lastInputTime < NOISE_THRESHOLD_MS) return;
-
-    // Update last input time
-    lastInputTime = now;
-
-    // 1. COMMANDS (Instant)
-    const fullText = target.isContentEditable ? target.innerText : target.value;
-    for (const [cmd, rep] of Object.entries(COMMANDS)) {
-        if (fullText.toLowerCase().trimEnd().endsWith(cmd)) {
-            applyFix(target, cmd, rep);
-            return;
-        }
-    }
-
-    // 2. ACRONYMS (Delayed)
-    clearTimeout(globalDebounceTimer);
-    globalDebounceTimer = setTimeout(() => {
-        applyGlobalAcronymFix(target);
-    }, 700); // Increased debounce for dictation pause handling
+document.addEventListener("selectionchange", () => {
+    lastSelectionChangeAt = Date.now();
 });
 
-function applyGlobalAcronymFix(el) {
-    if (isProcessing || !el.isContentEditable) return;
-    isProcessing = true;
+document.addEventListener("keydown", (e) => {
+    const commitKeys = [
+        "ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown",
+        "Backspace", "Delete", "Enter"
+    ];
 
+    if (
+        commitKeys.includes(e.key) ||
+        (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey)
+    ) {
+        lastKeyCommitAt = Date.now();
+    }
+}, true);
+
+document.addEventListener("input", (e) => {
+    if (!window.PICKLE_ENABLED || isProcessing) return;
+
+    const target = getEditableTarget(e.target);
+    if (!target) return;
+
+    if (!isCaretStable()) return;
+
+    const command = getCommandAtCaret(target);
+
+    if (command) {
+        applyFix(target, command.cmd, command.replacement);
+        return;
+    }
+
+    clearTimeout(globalDebounceTimer);
+    globalDebounceTimer = setTimeout(() => {
+        if (!isProcessing && isCaretStable()) {
+            applyLocalAcronymFix(target);
+        }
+    }, 500);
+}, true);
+
+function getEditableTarget(target) {
+    if (!target) return null;
+
+    if (target.matches?.("textarea, input")) {
+        return target;
+    }
+
+    return target.closest?.('[contenteditable="true"]') || null;
+}
+
+function isCaretStable() {
+    const now = Date.now();
+
+    const recentMouseClick = now - lastMouseDownAt < CARET_STABILIZE_MS;
+    const recentSelectionChange = now - lastSelectionChangeAt < CARET_STABILIZE_MS;
+    const keyboardCommittedAfterClick = lastKeyCommitAt > lastMouseDownAt;
+
+    if (keyboardCommittedAfterClick) return true;
+    if (!recentMouseClick && !recentSelectionChange) return true;
+
+    return false;
+}
+
+function escapeRegex(text) {
+    return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function getFreshSelectionInside(el) {
     const sel = window.getSelection();
-    if (!sel.rangeCount) { isProcessing = false; return; }
+    if (!sel || !sel.rangeCount) return null;
 
-    // Save Cursor State
     const range = sel.getRangeAt(0);
-    const originalOffset = range.startOffset;
-    const originalNode = range.startContainer;
 
-    const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT, null, false);
-    let node;
-    let anyChanges = false;
+    if (!document.contains(range.startContainer)) return null;
+    if (!el.contains(range.startContainer)) return null;
 
-    while (node = walker.nextNode()) {
-        let text = node.textContent;
-        let modifiedText = text;
+    return { sel, range };
+}
 
-        ACRONYMS.forEach(acr => {
-            // Updated Regex: Handles lowercase at start, middle, or end of string
-            const regex = new RegExp(`\\b${acr}\\b`, "gi");
-            modifiedText = modifiedText.replace(regex, (match) => {
-                if (match !== acr.toUpperCase()) {
-                    anyChanges = true;
-                    return acr.toUpperCase();
-                }
-                return match;
-            });
-        });
+function getCommandAtCaret(el) {
+    const commandEntries = Object.entries(COMMANDS).sort(
+        (a, b) => b[0].length - a[0].length
+    );
 
-        if (text !== modifiedText) {
-            // We use textContent update here for speed in deep nodes, 
-            // then restore the selection at the end.
-            node.textContent = modifiedText;
+    if (!el.isContentEditable) {
+        const start = el.selectionStart;
+        if (typeof start !== "number") return null;
+
+        const textBeforeCaret = el.value.slice(0, start);
+
+        for (const [cmd, replacement] of commandEntries) {
+            const regex = new RegExp(`(^|\\s)(${escapeRegex(cmd)})\\s*$`, "i");
+            if (regex.test(textBeforeCaret)) {
+                return { cmd, replacement };
+            }
+        }
+
+        return null;
+    }
+
+    const fresh = getFreshSelectionInside(el);
+    if (!fresh) return null;
+
+    const { range } = fresh;
+    const node = range.startContainer;
+
+    if (node.nodeType !== Node.TEXT_NODE) return null;
+
+    const textBeforeCaret = node.textContent.slice(0, range.startOffset);
+
+    for (const [cmd, replacement] of commandEntries) {
+        const regex = new RegExp(`(^|\\s)(${escapeRegex(cmd)})\\s*$`, "i");
+        if (regex.test(textBeforeCaret)) {
+            return { cmd, replacement };
         }
     }
 
-    // Restore Selection if changes were made
-    if (anyChanges) {
-        try {
-            const newRange = document.createRange();
-            newRange.setStart(originalNode, originalOffset);
-            newRange.collapse(true);
-            sel.removeAllRanges();
-            sel.addRange(newRange);
-        } catch (e) {
-            // If the node was completely rebuilt by Gmail, stay at the end
-        }
-    }
-
-    setTimeout(() => { isProcessing = false; }, 50);
+    return null;
 }
 
 function applyFix(el, trigger, replacement) {
-    isProcessing = true;
-    const sel = window.getSelection();
-    if (!sel || !sel.rangeCount) { isProcessing = false; return; }
+    if (!window.PICKLE_ENABLED || isProcessing) return;
 
-    const range = sel.getRangeAt(0);
+    isProcessing = true;
 
     try {
-        // 1. Highlight the trigger word ("new line", etc.)
-        range.setStart(sel.anchorNode, Math.max(0, sel.anchorOffset - trigger.length));
-        sel.removeAllRanges();
-        sel.addRange(range);
-
-        // 2. Delete the trigger word
-        document.execCommand('delete', false);
-        
-        // 3. Insert clean breaks based on the command
-        if (replacement.includes("<br>")) {
-            // "new line" = 1 break, "new paragraph" = 3 breaks
-            const count = (replacement.match(/<br>/g) || []).length;
-            for (let i = 0; i < count; i++) {
-                document.execCommand('insertLineBreak', false);
-            }
+        if (!el.isContentEditable) {
+            applyInputFix(el, trigger, replacement);
         } else {
-            // For "scratch that", just leave it deleted
-            document.execCommand('insertText', false, replacement);
+            applyContentEditableFix(el, trigger, replacement);
         }
     } catch (err) {
         console.error("Command Error:", err);
     }
 
-    // **Fix the caret position after insertion**
-    setTimeout(() => { 
-        const caretPosition = sel.focusOffset;
-        const newRange = document.createRange();
-        const currentNode = sel.focusNode;
-        newRange.setStart(currentNode, caretPosition);
-        newRange.collapse(true);
-        sel.removeAllRanges();
-        sel.addRange(newRange);
-        
-        // Reset the processing flag after fixing caret position
+    setTimeout(() => {
+        isProcessing = false;
+    }, 80);
+}
+
+function applyInputFix(el, trigger, replacement) {
+    const start = el.selectionStart;
+    const end = el.selectionEnd;
+
+    if (typeof start !== "number" || typeof end !== "number") return;
+
+    const textBeforeCaret = el.value.slice(0, start);
+    const regex = new RegExp(`(^|\\s)(${escapeRegex(trigger)})\\s*$`, "i");
+    const match = textBeforeCaret.match(regex);
+
+    if (!match) return;
+
+    const commandStart = match.index + match[1].length;
+    const inputReplacement = replacement.replace(/<br>/g, "\n");
+
+    el.setRangeText(inputReplacement, commandStart, start, "end");
+    el.dispatchEvent(new Event("input", { bubbles: true }));
+}
+
+function applyContentEditableFix(el, trigger, replacement) {
+    const fresh = getFreshSelectionInside(el);
+    if (!fresh) return;
+
+    const { sel, range } = fresh;
+    const node = range.startContainer;
+
+    if (node.nodeType !== Node.TEXT_NODE) return;
+
+    const offset = range.startOffset;
+    const textBeforeCaret = node.textContent.slice(0, offset);
+
+    const regex = new RegExp(`(^|\\s)(${escapeRegex(trigger)})\\s*$`, "i");
+    const match = textBeforeCaret.match(regex);
+
+    if (!match) return;
+
+    const commandStart = match.index + match[1].length;
+
+    const deleteRange = document.createRange();
+    deleteRange.setStart(node, commandStart);
+    deleteRange.setEnd(node, offset);
+
+    sel.removeAllRanges();
+    sel.addRange(deleteRange);
+
+    document.execCommand("delete", false);
+
+    if (replacement.includes("<br>")) {
+        const count = (replacement.match(/<br>/g) || []).length;
+
+        for (let i = 0; i < count; i++) {
+            document.execCommand("insertLineBreak", false);
+        }
+    } else if (replacement) {
+        document.execCommand("insertText", false, replacement);
+    }
+
+    const afterSelection = window.getSelection();
+
+    if (afterSelection && afterSelection.rangeCount) {
+        const postInsertRange = afterSelection.getRangeAt(0).cloneRange();
+
+        setTimeout(() => {
+            if (!document.contains(postInsertRange.startContainer)) return;
+
+            const liveSelection = window.getSelection();
+            if (!liveSelection) return;
+
+            liveSelection.removeAllRanges();
+            liveSelection.addRange(postInsertRange);
+        }, 0);
+    }
+
+    el.dispatchEvent(new Event("input", { bubbles: true }));
+}
+
+function applyLocalAcronymFix(el) {
+    if (!window.PICKLE_ENABLED || isProcessing) return;
+
+    isProcessing = true;
+
+    try {
+        if (!el.isContentEditable) {
+            fixInputAcronyms(el);
+        } else {
+            fixContentEditableAcronyms(el);
+        }
+    } catch (err) {
+        console.error("Acronym Fix Error:", err);
+    }
+
+    setTimeout(() => {
         isProcessing = false;
     }, 50);
+}
+
+function fixInputAcronyms(el) {
+    const start = el.selectionStart;
+    const end = el.selectionEnd;
+
+    if (typeof start !== "number" || typeof end !== "number") return;
+
+    const windowSize = 250;
+    const from = Math.max(0, start - windowSize);
+    const before = el.value.slice(0, from);
+    let targetText = el.value.slice(from, start);
+    const after = el.value.slice(start);
+
+    const original = targetText;
+
+    ACRONYMS.forEach((acr) => {
+        const regex = new RegExp(`\\b${acr}\\b`, "gi");
+        targetText = targetText.replace(regex, acr);
+    });
+
+    if (targetText === original) return;
+
+    el.value = before + targetText + after;
+
+    const offsetDiff = targetText.length - original.length;
+    const newPos = start + offsetDiff;
+
+    el.setSelectionRange(newPos, newPos);
+    el.dispatchEvent(new Event("input", { bubbles: true }));
+}
+
+function fixContentEditableAcronyms(el) {
+    const fresh = getFreshSelectionInside(el);
+    if (!fresh) return;
+
+    const { sel, range } = fresh;
+    const node = range.startContainer;
+
+    if (node.nodeType !== Node.TEXT_NODE) return;
+
+    const originalText = node.textContent;
+    let modifiedText = originalText;
+
+    ACRONYMS.forEach((acr) => {
+        const regex = new RegExp(`\\b${acr}\\b`, "gi");
+        modifiedText = modifiedText.replace(regex, acr);
+    });
+
+    if (modifiedText === originalText) return;
+
+    const liveOffset = range.startOffset;
+
+    node.textContent = modifiedText;
+
+    const safeOffset = Math.min(liveOffset, node.textContent.length);
+
+    const newRange = document.createRange();
+    newRange.setStart(node, safeOffset);
+    newRange.collapse(true);
+
+    sel.removeAllRanges();
+    sel.addRange(newRange);
+
+    el.dispatchEvent(new Event("input", { bubbles: true }));
 }
