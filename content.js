@@ -1,5 +1,36 @@
 window.PICKLE_ENABLED = true;
 
+const DEBUG_MODE = true;
+
+/* -----------------------------
+   DEBUG LOGGER
+----------------------------- */
+
+function logDebug(label, data = {}) {
+    if (!DEBUG_MODE) return;
+
+    const sel = window.getSelection();
+    let caretInfo = null;
+
+    if (sel && sel.rangeCount) {
+        const r = sel.getRangeAt(0);
+        caretInfo = {
+            node: r.startContainer?.nodeName,
+            offset: r.startOffset
+        };
+    }
+
+    console.log(`🧠 ${label}`, {
+        time: new Date().toISOString(),
+        caret: caretInfo,
+        ...data
+    });
+}
+
+/* -----------------------------
+   STATE
+----------------------------- */
+
 let isProcessing = false;
 let globalDebounceTimer = null;
 
@@ -12,62 +43,80 @@ const COMMANDS = {
 
 const ACRONYMS = ["MRI", "CT", "IV", "PT", "XR"];
 
-const CARET_STABILIZE_MS = 300;
+const CARET_STABILIZE_MS = 400;
+
 let lastMouseDownAt = 0;
 let lastSelectionChangeAt = 0;
 let lastKeyCommitAt = 0;
 
+/* -----------------------------
+   CARET TRACKING
+----------------------------- */
+
 document.addEventListener("mousedown", () => {
     lastMouseDownAt = Date.now();
+    logDebug("Mouse Down");
 }, true);
 
 document.addEventListener("selectionchange", () => {
     lastSelectionChangeAt = Date.now();
+    logDebug("Selection Changed");
 });
 
 document.addEventListener("keydown", (e) => {
-    const commitKeys = [
-        "ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown",
-        "Backspace", "Delete", "Enter"
-    ];
-
     if (
-        commitKeys.includes(e.key) ||
-        (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey)
+        e.key.length === 1 ||
+        ["Enter", "Backspace", "Delete"].includes(e.key)
     ) {
         lastKeyCommitAt = Date.now();
+        logDebug("Keyboard Commit", { key: e.key });
     }
 }, true);
 
+/* -----------------------------
+   INPUT HANDLER
+----------------------------- */
+
 document.addEventListener("input", (e) => {
+    logDebug("Input Event", { target: e.target?.tagName });
+
     if (!window.PICKLE_ENABLED || isProcessing) return;
 
     const target = getEditableTarget(e.target);
     if (!target) return;
 
-    if (!isCaretStable()) return;
+    if (!isCaretStable()) {
+        logDebug("Caret NOT Stable → Skip");
+        return;
+    }
 
     const command = getCommandAtCaret(target);
 
     if (command) {
-        applyFix(target, command.cmd, command.replacement);
+        logDebug("Command Detected", { command: command.cmd });
+        applyCommand(target, command.cmd, command.replacement);
         return;
     }
 
     clearTimeout(globalDebounceTimer);
+
     globalDebounceTimer = setTimeout(() => {
         if (!isProcessing && isCaretStable()) {
-            applyLocalAcronymFix(target);
+            logDebug("Acronym Fix Triggered");
+            applySafeAcronymFix(target);
         }
-    }, 500);
+    }, 600);
+
 }, true);
+
+/* -----------------------------
+   HELPERS
+----------------------------- */
 
 function getEditableTarget(target) {
     if (!target) return null;
 
-    if (target.matches?.("textarea, input")) {
-        return target;
-    }
+    if (target.matches?.("textarea, input")) return target;
 
     return target.closest?.('[contenteditable="true"]') || null;
 }
@@ -75,18 +124,14 @@ function getEditableTarget(target) {
 function isCaretStable() {
     const now = Date.now();
 
-    const recentMouseClick = now - lastMouseDownAt < CARET_STABILIZE_MS;
-    const recentSelectionChange = now - lastSelectionChangeAt < CARET_STABILIZE_MS;
-    const keyboardCommittedAfterClick = lastKeyCommitAt > lastMouseDownAt;
+    const recentMouse = now - lastMouseDownAt < CARET_STABILIZE_MS;
+    const recentSelection = now - lastSelectionChangeAt < CARET_STABILIZE_MS;
+    const keyboardCommitted = lastKeyCommitAt > lastMouseDownAt;
 
-    if (keyboardCommittedAfterClick) return true;
-    if (!recentMouseClick && !recentSelectionChange) return true;
+    if (keyboardCommitted) return true;
+    if (!recentMouse && !recentSelection) return true;
 
     return false;
-}
-
-function escapeRegex(text) {
-    return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function getFreshSelectionInside(el) {
@@ -101,24 +146,24 @@ function getFreshSelectionInside(el) {
     return { sel, range };
 }
 
+/* -----------------------------
+   COMMAND DETECTION
+----------------------------- */
+
 function getCommandAtCaret(el) {
-    const commandEntries = Object.entries(COMMANDS).sort(
-        (a, b) => b[0].length - a[0].length
-    );
+    const entries = Object.entries(COMMANDS);
 
     if (!el.isContentEditable) {
         const start = el.selectionStart;
-        if (typeof start !== "number") return null;
+        if (start == null) return null;
 
-        const textBeforeCaret = el.value.slice(0, start);
+        const text = el.value.slice(0, start);
 
-        for (const [cmd, replacement] of commandEntries) {
-            const regex = new RegExp(`(^|\\s)(${escapeRegex(cmd)})\\s*$`, "i");
-            if (regex.test(textBeforeCaret)) {
-                return { cmd, replacement };
+        for (const [cmd, rep] of entries) {
+            if (text.toLowerCase().endsWith(cmd)) {
+                return { cmd, replacement: rep };
             }
         }
-
         return null;
     }
 
@@ -130,31 +175,34 @@ function getCommandAtCaret(el) {
 
     if (node.nodeType !== Node.TEXT_NODE) return null;
 
-    const textBeforeCaret = node.textContent.slice(0, range.startOffset);
+    const text = node.textContent.slice(0, range.startOffset);
 
-    for (const [cmd, replacement] of commandEntries) {
-        const regex = new RegExp(`(^|\\s)(${escapeRegex(cmd)})\\s*$`, "i");
-        if (regex.test(textBeforeCaret)) {
-            return { cmd, replacement };
+    for (const [cmd, rep] of entries) {
+        if (text.toLowerCase().endsWith(cmd)) {
+            return { cmd, replacement: rep };
         }
     }
 
     return null;
 }
 
-function applyFix(el, trigger, replacement) {
-    if (!window.PICKLE_ENABLED || isProcessing) return;
+/* -----------------------------
+   COMMAND EXECUTION
+----------------------------- */
+
+function applyCommand(el, trigger, replacement) {
+    logDebug("Applying Command", { trigger });
 
     isProcessing = true;
 
     try {
         if (!el.isContentEditable) {
-            applyInputFix(el, trigger, replacement);
+            applyInputCommand(el, trigger, replacement);
         } else {
-            applyContentEditableFix(el, trigger, replacement);
+            applyContentEditableCommand(el, trigger, replacement);
         }
-    } catch (err) {
-        console.error("Command Error:", err);
+    } catch (e) {
+        console.error(e);
     }
 
     setTimeout(() => {
@@ -162,26 +210,7 @@ function applyFix(el, trigger, replacement) {
     }, 80);
 }
 
-function applyInputFix(el, trigger, replacement) {
-    const start = el.selectionStart;
-    const end = el.selectionEnd;
-
-    if (typeof start !== "number" || typeof end !== "number") return;
-
-    const textBeforeCaret = el.value.slice(0, start);
-    const regex = new RegExp(`(^|\\s)(${escapeRegex(trigger)})\\s*$`, "i");
-    const match = textBeforeCaret.match(regex);
-
-    if (!match) return;
-
-    const commandStart = match.index + match[1].length;
-    const inputReplacement = replacement.replace(/<br>/g, "\n");
-
-    el.setRangeText(inputReplacement, commandStart, start, "end");
-    el.dispatchEvent(new Event("input", { bubbles: true }));
-}
-
-function applyContentEditableFix(el, trigger, replacement) {
+function applyContentEditableCommand(el, trigger, replacement) {
     const fresh = getFreshSelectionInside(el);
     if (!fresh) return;
 
@@ -191,134 +220,107 @@ function applyContentEditableFix(el, trigger, replacement) {
     if (node.nodeType !== Node.TEXT_NODE) return;
 
     const offset = range.startOffset;
-    const textBeforeCaret = node.textContent.slice(0, offset);
+    const text = node.textContent;
 
-    const regex = new RegExp(`(^|\\s)(${escapeRegex(trigger)})\\s*$`, "i");
-    const match = textBeforeCaret.match(regex);
+    if (!text.toLowerCase().endsWith(trigger)) return;
 
-    if (!match) return;
-
-    const commandStart = match.index + match[1].length;
+    const start = offset - trigger.length;
 
     const deleteRange = document.createRange();
-    deleteRange.setStart(node, commandStart);
+    deleteRange.setStart(node, start);
     deleteRange.setEnd(node, offset);
 
     sel.removeAllRanges();
     sel.addRange(deleteRange);
 
-    document.execCommand("delete", false);
+    document.execCommand("delete");
 
     if (replacement.includes("<br>")) {
         const count = (replacement.match(/<br>/g) || []).length;
 
         for (let i = 0; i < count; i++) {
-            document.execCommand("insertLineBreak", false);
+            document.execCommand("insertLineBreak");
         }
-    } else if (replacement) {
-        document.execCommand("insertText", false, replacement);
     }
 
-    const afterSelection = window.getSelection();
-
-    if (afterSelection && afterSelection.rangeCount) {
-        const postInsertRange = afterSelection.getRangeAt(0).cloneRange();
-
-        setTimeout(() => {
-            if (!document.contains(postInsertRange.startContainer)) return;
-
-            const liveSelection = window.getSelection();
-            if (!liveSelection) return;
-
-            liveSelection.removeAllRanges();
-            liveSelection.addRange(postInsertRange);
-        }, 0);
-    }
-
-    el.dispatchEvent(new Event("input", { bubbles: true }));
+    logDebug("Command Inserted");
 }
 
-function applyLocalAcronymFix(el) {
-    if (!window.PICKLE_ENABLED || isProcessing) return;
-
-    isProcessing = true;
-
-    try {
-        if (!el.isContentEditable) {
-            fixInputAcronyms(el);
-        } else {
-            fixContentEditableAcronyms(el);
-        }
-    } catch (err) {
-        console.error("Acronym Fix Error:", err);
-    }
-
-    setTimeout(() => {
-        isProcessing = false;
-    }, 50);
-}
-
-function fixInputAcronyms(el) {
+function applyInputCommand(el, trigger, replacement) {
     const start = el.selectionStart;
-    const end = el.selectionEnd;
+    if (start == null) return;
 
-    if (typeof start !== "number" || typeof end !== "number") return;
+    const text = el.value.slice(0, start);
 
-    const windowSize = 250;
-    const from = Math.max(0, start - windowSize);
-    const before = el.value.slice(0, from);
-    let targetText = el.value.slice(from, start);
-    const after = el.value.slice(start);
+    if (!text.toLowerCase().endsWith(trigger)) return;
 
-    const original = targetText;
+    const pos = start - trigger.length;
 
-    ACRONYMS.forEach((acr) => {
-        const regex = new RegExp(`\\b${acr}\\b`, "gi");
-        targetText = targetText.replace(regex, acr);
-    });
-
-    if (targetText === original) return;
-
-    el.value = before + targetText + after;
-
-    const offsetDiff = targetText.length - original.length;
-    const newPos = start + offsetDiff;
-
-    el.setSelectionRange(newPos, newPos);
-    el.dispatchEvent(new Event("input", { bubbles: true }));
+    el.setRangeText(replacement.replace(/<br>/g, "\n"), pos, start, "end");
 }
 
-function fixContentEditableAcronyms(el) {
+/* -----------------------------
+   SAFE ACRONYM FIX
+----------------------------- */
+
+function applySafeAcronymFix(el) {
     const fresh = getFreshSelectionInside(el);
     if (!fresh) return;
 
-    const { sel, range } = fresh;
+    const { range } = fresh;
     const node = range.startContainer;
 
     if (node.nodeType !== Node.TEXT_NODE) return;
 
-    const originalText = node.textContent;
-    let modifiedText = originalText;
+    const text = node.textContent;
+    let modified = text;
 
-    ACRONYMS.forEach((acr) => {
+    ACRONYMS.forEach(acr => {
         const regex = new RegExp(`\\b${acr}\\b`, "gi");
-        modifiedText = modifiedText.replace(regex, acr);
+        modified = modified.replace(regex, acr);
     });
 
-    if (modifiedText === originalText) return;
+    if (modified === text) return;
 
-    const liveOffset = range.startOffset;
+    // 🔒 ONLY modify if cursor is at end (safe zone)
+    if (range.startOffset !== text.length) {
+        logDebug("Acronym Fix Skipped (Not at End)");
+        return;
+    }
 
-    node.textContent = modifiedText;
+    node.textContent = modified;
 
-    const safeOffset = Math.min(liveOffset, node.textContent.length);
-
-    const newRange = document.createRange();
-    newRange.setStart(node, safeOffset);
-    newRange.collapse(true);
-
-    sel.removeAllRanges();
-    sel.addRange(newRange);
-
-    el.dispatchEvent(new Event("input", { bubbles: true }));
+    logDebug("Acronym Applied");
 }
+
+/* -----------------------------
+   CARET JUMP DETECTION
+----------------------------- */
+
+let lastCaretSnapshot = null;
+
+function detectCaretJump() {
+    const sel = window.getSelection();
+    if (!sel || !sel.rangeCount) return;
+
+    const r = sel.getRangeAt(0);
+
+    const current = {
+        node: r.startContainer,
+        offset: r.startOffset
+    };
+
+    if (
+        lastCaretSnapshot &&
+        current.node !== lastCaretSnapshot.node
+    ) {
+        logDebug("⚠️ CARET JUMP DETECTED", {
+            from: lastCaretSnapshot,
+            to: current
+        });
+    }
+
+    lastCaretSnapshot = current;
+}
+
+setInterval(detectCaretJump, 300);
